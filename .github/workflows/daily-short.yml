@@ -1,0 +1,59 @@
+name: The Marquee - Daily Entertainment Trend
+
+on:
+  schedule:
+    # Runs at 14:00 UTC every day — adjust to whenever your audience is most active.
+    # Use https://crontab.guru to build a different schedule.
+    - cron: "0 14 * * *"
+  workflow_dispatch: {}   # lets you click "Run workflow" manually in the Actions tab to test
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write   # needed so the last step can commit state/used_topics.json back to the repo
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the pipeline
+        working-directory: scripts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_TTS_VOICE: "shimmer"
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          YT_API_KEY: ${{ secrets.YT_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          NEWS_REGION: "US"
+          NEWS_LANGUAGE: "en"
+          NEWS_TOPIC_SECTION: "ENTERTAINMENT"
+          YT_CATEGORY_ID: "24"
+          YT_PRIVACY_STATUS: "scheduled"   # uploads private, auto-goes-public after the delay below
+          YT_PUBLISH_DELAY_HOURS: "3"      # gives you a window to catch anything before it's public
+        run: python main.py
+
+      # Commits the updated "already used this headline" tracker back to the repo
+      # so tomorrow's run doesn't repeat today's story.
+      - name: Save used-topics state
+        run: |
+          git config user.name "trend-shorts-bot"
+          git config user.email "actions@github.com"
+          git add state/used_topics.json
+          git diff --quiet --cached || git commit -m "Update used topics [skip ci]"
+          git push
