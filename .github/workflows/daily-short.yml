@@ -4,13 +4,13 @@ on:
   schedule:
     # Runs at 14:00 UTC every day — adjust to whenever your audience is most active.
     # Use https://crontab.guru to build a different schedule.
-    - cron: "0 14 * * *"
+    - cron: "0 7 * * *"
   workflow_dispatch: {}   # lets you click "Run workflow" manually in the Actions tab to test
 
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       contents: write   # needed so the last step can commit state/used_topics.json back to the repo
 
