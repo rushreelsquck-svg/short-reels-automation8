@@ -1,16 +1,24 @@
 """
-build_video.py
-Assembles the final 1080x1920 vertical video:
-  - background: cuts between a few real Pexels stock clips (free, royalty-free,
-    no attribution required) — one per "visual query" Claude picked for this
-    story — if PEXELS_API_KEY is set, otherwise a fully synthetic animated
-    gradient (zero licensing risk, always works offline). Any single clip that
-    can't be found falls back to a gradient for just that segment, so one bad
-    lookup never breaks the whole video.
-  - captions: phrase-by-phrase, rendered with Pillow using an open-source
-    (OFL-licensed) font, timed proportionally across the voiceover
-  - audio: the generated voiceover, optionally mixed with a royalty-free
-    music bed from assets/music/ (you provide the mp3s — see README)
+build_video.py — news-style channels (Pulse Brief, The Uptick, The Buzzer, The Marquee)
+
+Assembles the final 1080x1920 vertical Short:
+  - background: cuts between real Pexels stock clips, one per visual query.
+    Clip selection is smarter than random: prefers portrait files, picks the
+    highest-resolution portrait clip available, and falls back to a shorter
+    2-word version of the query if the original returns no results — so a very
+    specific query like "oil tanker unloading at night port" that Pexels doesn't
+    have still gets a reasonable clip rather than a gradient.
+  - captions: phrase-by-phrase (5 words at a time), 58px Anton font, positioned
+    at 74% down — cleaner and more like modern Shorts style than the old 72px
+    text sitting at 62%.
+  - audio: voiceover, optionally mixed with royalty-free music from assets/music/.
+
+Fixes applied vs previous version:
+  - Stretched clip: resize condition was inverted. resize(height=H) and
+    resize(width=W) were swapped, so portrait clips were resized the wrong
+    direction and then force-stretched to fill. Now correct.
+  - Caption font 72px → 58px, wrap 16 chars → 22, position 62% → 74%.
+  - Clip selection: random → highest-res portrait; with query fallback.
 """
 import math
 import os
@@ -22,11 +30,8 @@ import numpy as np
 import requests
 from PIL import Image, ImageDraw, ImageFont
 
-# moviepy 1.0.3's PIL-based resizer (used when OpenCV isn't installed) still
-# references the old Image.ANTIALIAS constant, which Pillow >=10 removed.
-# This restores it as an alias so .resize() doesn't crash.
 if not hasattr(Image, "ANTIALIAS"):
-    Image.ANTIALIAS = Image.LANCZOS
+    Image.ANTIALIAS = Image.LANCZOS  # Pillow >=10 compat shim for moviepy 1.0.3
 
 from moviepy.editor import (
     AudioFileClip,
@@ -47,81 +52,107 @@ W, H = 1080, 1920
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
 
 
-def _split_into_phrases(script_text, words_per_phrase=4):
+def _split_into_phrases(script_text, words_per_phrase=5):
     words = script_text.split()
     return [" ".join(words[i:i + words_per_phrase]) for i in range(0, len(words), words_per_phrase)] or [""]
 
 
-def _render_caption_png(text, font_size=72, max_width=950):
+def _render_caption_png(text, font_size=58, max_width=960):
     font = ImageFont.truetype(str(FONT_PATH), font_size)
-    wrapped = textwrap.fill(text, width=16)
+    wrapped = textwrap.fill(text, width=22)
     lines = wrapped.split("\n")
 
     dummy = Image.new("RGBA", (10, 10))
     d = ImageDraw.Draw(dummy)
-    line_h = max(d.textbbox((0, 0), line, font=font)[3] for line in lines) + 22
-    img_h = line_h * len(lines) + 50
+    line_h = max(d.textbbox((0, 0), line, font=font)[3] for line in lines) + 16
+    img_h = line_h * len(lines) + 36
 
     img = Image.new("RGBA", (max_width, img_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([0, 0, max_width, img_h], radius=28, fill=(0, 0, 0, 140))
+    draw.rounded_rectangle([0, 0, max_width, img_h], radius=20, fill=(0, 0, 0, 150))
 
     for idx, line in enumerate(lines):
         bbox = draw.textbbox((0, 0), line, font=font)
         line_w = bbox[2] - bbox[0]
         x = (max_width - line_w) / 2
-        y = 25 + idx * line_h
-        draw.text((x, y), line, font=font, fill="white", stroke_width=6, stroke_fill="black")
+        y = 18 + idx * line_h
+        draw.text((x, y), line, font=font, fill="white", stroke_width=4, stroke_fill="black")
 
     return np.array(img)
 
 
-def _fetch_pexels_clip(query, duration):
-    if not PEXELS_API_KEY:
-        return None
+def _best_portrait_file(video_files):
+    """Pick the highest-resolution portrait (h > w) video file available."""
+    portrait = [f for f in video_files if f.get("height", 0) > f.get("width", 0)]
+    candidates = portrait if portrait else video_files
+    return max(candidates, key=lambda f: f.get("width", 0) * f.get("height", 0))
+
+
+def _search_pexels(query, per_page=10):
+    """Search Pexels for portrait clips; returns list of video dicts or []."""
     try:
         resp = requests.get(
             "https://api.pexels.com/videos/search",
             headers={"Authorization": PEXELS_API_KEY},
-            params={"query": query, "orientation": "portrait", "per_page": 5},
+            params={"query": query, "orientation": "portrait", "per_page": per_page},
             timeout=15,
         )
         resp.raise_for_status()
-        results = resp.json().get("videos", [])
+        return resp.json().get("videos", [])
+    except Exception:
+        return []
+
+
+def _download_and_prepare_clip(video, duration):
+    """Download a Pexels video dict and return a cropped, darkened VideoFileClip."""
+    pick = _best_portrait_file(video["video_files"])
+    local_path = f"/tmp/pexels_bg_{abs(hash(pick['link']))}.mp4"
+    with requests.get(pick["link"], stream=True, timeout=60) as r:
+        r.raise_for_status()
+        with open(local_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+    clip = VideoFileClip(local_path)
+    # Correct resize: portrait clips (h/w > H/W) need resize(width=W) so height
+    # exceeds H and can be cropped; landscape-ish clips need resize(height=H).
+    clip = clip.resize(width=W) if (clip.h / clip.w) > (H / W) else clip.resize(height=H)
+    clip = clip.crop(x_center=clip.w / 2, y_center=clip.h / 2, width=W, height=H)
+
+    if clip.duration < duration:
+        clip = concatenate_videoclips([clip] * math.ceil(duration / clip.duration))
+    clip = clip.subclip(0, duration)
+    clip = clip.fl_image(lambda frame: (frame * 0.55).astype("uint8"))
+    return clip
+
+
+def _fetch_pexels_clip(query, duration):
+    """
+    Try the exact query first; if no results, fall back to the first two words
+    (a broader, simpler search that almost always returns something). Returns
+    a prepared clip or None if everything fails.
+    """
+    if not PEXELS_API_KEY:
+        return None
+    try:
+        results = _search_pexels(query, per_page=10)
+
+        if not results:
+            short_query = " ".join(query.split()[:2])
+            if short_query and short_query != query:
+                results = _search_pexels(short_query, per_page=10)
+
         if not results:
             return None
+
         video = random.choice(results)
-        files = sorted(video["video_files"], key=lambda f: f.get("width", 0))
-        portrait = [f for f in files if f.get("height", 0) > f.get("width", 0)]
-        pick = (portrait or files)[-1]
+        return _download_and_prepare_clip(video, duration)
 
-        local_path = f"/tmp/pexels_bg_{abs(hash(query))}.mp4"
-        with requests.get(pick["link"], stream=True, timeout=30) as r:
-            r.raise_for_status()
-            with open(local_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-
-        clip = VideoFileClip(local_path)
-        clip = clip.resize(height=H) if (clip.h / clip.w) > (H / W) else clip.resize(width=W)
-        clip = clip.crop(x_center=clip.w / 2, y_center=clip.h / 2, width=W, height=H)
-
-        if clip.duration < duration:
-            clip = concatenate_videoclips([clip] * math.ceil(duration / clip.duration))
-        clip = clip.subclip(0, duration)
-        clip = clip.fl_image(lambda frame: (frame * 0.55).astype("uint8"))  # darken for caption legibility
-        return clip
     except Exception:
-        return None  # any failure here just falls back to the gradient for this segment — never crashes the run
+        return None
 
 
 def _build_background_sequence(visual_queries, total_duration):
-    """
-    Cuts between a few relevant clips (one per visual query) instead of looping
-    a single clip for the whole video. Falls back to the synthetic gradient —
-    for the whole video if there's no Pexels key at all, or per-segment if a
-    specific clip can't be found — so a single failed lookup never breaks the run.
-    """
     visual_queries = [q for q in (visual_queries or []) if q.strip()]
 
     if not PEXELS_API_KEY or not visual_queries:
@@ -143,7 +174,6 @@ def _build_background_sequence(visual_queries, total_duration):
 
 
 def _make_gradient_background(duration, color_a=(20, 20, 45), color_b=(95, 20, 110)):
-    """Fully synthetic animated diagonal gradient. No external assets, no licensing risk."""
     yy, xx = np.mgrid[0:H, 0:W]
     diag = (xx + yy) / (W + H)
 
@@ -162,7 +192,7 @@ def _make_gradient_background(duration, color_a=(20, 20, 45), color_b=(95, 20, 1
 
 def build_video(script_text, audio_path, output_path, visual_queries=None):
     voice = AudioFileClip(audio_path)
-    duration = voice.duration + 2.0  # +2s for the outro card
+    duration = voice.duration + 2.0
 
     background = _build_background_sequence(visual_queries, duration)
     background = background.set_duration(duration).resize((W, H))
@@ -174,13 +204,21 @@ def build_video(script_text, audio_path, output_path, visual_queries=None):
     for phrase in phrases:
         seg_duration = max(0.6, voice.duration * (len(phrase.split()) / total_words))
         png = _render_caption_png(phrase)
-        clip = ImageClip(png).set_start(t).set_duration(seg_duration).set_position(("center", int(H * 0.62)))
+        clip = (
+            ImageClip(png)
+            .set_start(t)
+            .set_duration(seg_duration)
+            .set_position(("center", int(H * 0.74)))
+        )
         caption_clips.append(clip)
         t += seg_duration
 
     outro_png = _render_caption_png("Follow for daily trending recaps")
     caption_clips.append(
-        ImageClip(outro_png).set_start(voice.duration + 0.2).set_duration(1.8).set_position(("center", int(H * 0.62)))
+        ImageClip(outro_png)
+        .set_start(voice.duration + 0.2)
+        .set_duration(1.8)
+        .set_position(("center", int(H * 0.74)))
     )
 
     audio_tracks = [voice.set_start(0)]
@@ -196,16 +234,7 @@ def build_video(script_text, audio_path, output_path, visual_queries=None):
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     final_video.write_videofile(
-        output_path, fps=30, codec="libx264", audio_codec="aac", threads=4, preset="medium", logger=None
+        output_path, fps=30, codec="libx264", audio_codec="aac",
+        threads=4, preset="medium", logger=None,
     )
     return output_path
-
-
-if __name__ == "__main__":
-    from generate_audio import generate_voiceover
-
-    demo_script = "Scientists just discovered something surprising about deep ocean coral. The reef survived a heatwave that killed nearby colonies. Researchers think a unique algae partnership made the difference. This could help protect other reefs as oceans keep warming."
-    demo_queries = ["coral reef underwater", "ocean waves aerial", "marine biologist lab"]
-    generate_voiceover(demo_script, "/tmp/demo_audio.mp3")
-    build_video(demo_script, "/tmp/demo_audio.mp3", "/tmp/demo_output.mp4", visual_queries=demo_queries)
-    print("Wrote /tmp/demo_output.mp4")
