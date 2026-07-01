@@ -7,20 +7,34 @@ everything to YouTube's actual limits so the upload never gets rejected:
   - title: 100 characters
   - description: 5000 characters
 """
+import re
 
 MAX_TAGS_CHARS = 480  # leave a little headroom under YouTube's 500-char cap
 MAX_TITLE_CHARS = 95
 MAX_DESCRIPTION_CHARS = 4800
 
 
+def _sanitize_tag(tag: str) -> str:
+    """
+    Remove characters YouTube's API rejects in tags.
+    The most common culprits are & (from names like "Taylor Swift & Travis Kelce"),
+    < and > (from show titles), and " (from quoted phrases in trending keywords).
+    Any of these will cause the entire upload to fail with invalidTags.
+    """
+    tag = re.sub(r'[<>&",]', '', tag)
+    tag = ' '.join(tag.split())  # collapse any leftover extra whitespace
+    return tag.strip()[:100]
+
+
 def _dedupe_preserve_order(items):
     seen = set()
     out = []
     for item in items:
-        key = item.lower().strip()
+        clean = _sanitize_tag(item)
+        key = clean.lower()
         if key and key not in seen:
             seen.add(key)
-            out.append(item.strip())
+            out.append(clean)
     return out
 
 
