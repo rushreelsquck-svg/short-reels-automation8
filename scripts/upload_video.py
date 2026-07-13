@@ -3,6 +3,12 @@ upload_video.py
 Uploads the finished MP4 to YouTube as a Short using a stored refresh token
 (no browser/interactive login needed — this is what lets it run unattended
 inside GitHub Actions).
+
+YT_PRIVACY_STATUS supports an extra value beyond YouTube's own "public" /
+"unlisted" / "private": set it to "scheduled" to upload as private with a
+publishAt timestamp — YouTube then auto-flips it to public on its own at that
+time, no manual step needed. How far in the future is controlled by
+YT_PUBLISH_DELAY_HOURS (default 3).
 """
 import datetime
 import os
@@ -46,7 +52,10 @@ def _build_status_body():
 
 
 def _sanitize_tags(tags: list[str]) -> list[str]:
-    """Strip characters YouTube rejects in tags and drop anything that ends up empty."""
+    """
+    YouTube rejects tags containing: < > & " ' #
+    Strip those characters and drop any tag that ends up empty or over 100 chars.
+    """
     cleaned = []
     for tag in tags:
         tag = re.sub(r'[<>&"\'\#]', '', tag).strip()
