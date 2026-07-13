@@ -3,20 +3,10 @@ upload_video.py
 Uploads the finished MP4 to YouTube as a Short using a stored refresh token
 (no browser/interactive login needed — this is what lets it run unattended
 inside GitHub Actions).
-
-YT_PRIVACY_STATUS supports an extra value beyond YouTube's own "public" /
-"unlisted" / "private": set it to "scheduled" to upload as private with a
-publishAt timestamp — YouTube then auto-flips it to public on its own at that
-time, no manual step needed. (This is a YouTube API requirement, not our
-choice: publishAt only takes effect when privacyStatus is "private".) How far
-in the future that is controlled by YT_PUBLISH_DELAY_HOURS (default 3).
-
-Note: while waiting to go live, the video is actually *private* — not
-unlisted — so it won't open via a shared link either; only visible by signing
-into YouTube Studio.
 """
 import datetime
 import os
+import re
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -44,7 +34,7 @@ def _build_status_body():
         delay_hours = float(os.environ.get("YT_PUBLISH_DELAY_HOURS", "3"))
         publish_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=delay_hours)
         return {
-            "privacyStatus": "private",  # required by YouTube's API for publishAt to take effect
+            "privacyStatus": "private",
             "publishAt": publish_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "selfDeclaredMadeForKids": False,
         }
@@ -55,6 +45,16 @@ def _build_status_body():
     }
 
 
+def _sanitize_tags(tags: list[str]) -> list[str]:
+    """Strip characters YouTube rejects in tags and drop anything that ends up empty."""
+    cleaned = []
+    for tag in tags:
+        tag = re.sub(r'[<>&"\'\#]', '', tag).strip()
+        if tag and len(tag) <= 100:
+            cleaned.append(tag)
+    return cleaned
+
+
 def upload_short(video_path: str, title: str, description: str, tags: list[str]) -> str:
     youtube = _get_authenticated_service()
 
@@ -62,8 +62,8 @@ def upload_short(video_path: str, title: str, description: str, tags: list[str])
         "snippet": {
             "title": title,
             "description": description,
-            "tags": tags,
-            "categoryId": os.environ.get("YT_CATEGORY_ID", "25"),  # 25 = News & Politics
+            "tags": _sanitize_tags(tags),
+            "categoryId": os.environ.get("YT_CATEGORY_ID", "25"),
         },
         "status": _build_status_body(),
     }
@@ -86,14 +86,7 @@ def upload_short(video_path: str, title: str, description: str, tags: list[str])
 
 if __name__ == "__main__":
     import sys
-
     if len(sys.argv) < 2:
         print("Usage: python upload_video.py /path/to/video.mp4")
         sys.exit(1)
-
-    upload_short(
-        video_path=sys.argv[1],
-        title="Test upload from trend-shorts-bot",
-        description="This is a test upload. Safe to delete.",
-        tags=["test"],
-    )
+    upload_short(sys.argv[1], "Test upload", "Test description.", ["test"])
